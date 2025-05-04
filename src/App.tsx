@@ -1,10 +1,10 @@
-import Canvas from './components/Canvas';
+import './App.css';
+import FluidSimulation from './components/Canvas';
 
 function App() {
   return (
-    <div className="App">
-      <h1>Falling Sand Simulation</h1>
-      <Canvas/>
+    <div className="app-center">
+      <FluidSimulation />
     </div>
   );
 }

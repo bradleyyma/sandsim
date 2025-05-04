@@ -48,8 +48,8 @@ class SandParticle {
     this.pos = new Vec2(x, y);
     this.vel = new Vec2(0, 0);
     this.acc = new Vec2(0, 0);
-    this.mass = 2.0;
-    this.size = 4;
+    this.mass = 1.0;
+    this.size = 2;
     this.color = '#e6c288';
   }
   
@@ -61,7 +61,7 @@ class SandParticle {
   
   update(dt: number) {
     // Apply gravity - sand sinks
-    this.applyForce(new Vec2(0, 0.1 * this.mass));
+    this.applyForce(new Vec2(0, 0.3 * this.mass));
     
     // Update velocity
     this.vel = this.vel.add(this.acc.mult(dt));
@@ -82,7 +82,7 @@ class SandParticle {
   
   // Simple boundary collision
   checkBoundary(width: number, height: number) {
-    const bounce = 0.5; // Energy loss on bounce
+    const bounce = 0.1; // Energy loss on bounce
     
     if (this.pos.x < this.size) {
       this.pos.x = this.size;
@@ -110,6 +110,28 @@ class SandParticle {
   }
 }
 
+// Dust particle class (falls slower, smaller, settles on sand)
+class DustParticle extends SandParticle {
+  constructor(x: number, y: number) {
+    super(x, y);
+    this.mass = 0.5;
+    this.size = 1.5;
+    this.color = '#bfc9d1';
+  }
+  update(dt: number) {
+    // Less gravity
+    this.applyForce(new Vec2(0, 0.2 * this.mass));
+    this.vel = this.vel.add(this.acc.mult(dt));
+    const maxVel = 4;
+    const velLength = this.vel.length();
+    if (velLength > maxVel) {
+      this.vel = this.vel.normalize().mult(maxVel);
+    }
+    this.pos = this.pos.add(this.vel.mult(dt));
+    this.acc = new Vec2(0, 0);
+  }
+}
+
 // Simple fluid cell
 class FluidCell {
   u: number = 0;  // x velocity
@@ -125,10 +147,139 @@ class FluidCell {
   }
 }
 
+// Helper: clamp
+function clamp(val: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, val));
+}
+
+// Advection step (semi-Lagrangian)
+function advect(grid: FluidCell[][], uField: number[][], vField: number[][], dt: number, cellSize: number, rows: number, cols: number) {
+  const uNew: number[][] = [];
+  const vNew: number[][] = [];
+  for (let i = 0; i < rows; i++) {
+    uNew[i] = [];
+    vNew[i] = [];
+    for (let j = 0; j < cols; j++) {
+      // Backtrace
+      let x = j - uField[i][j] * dt / cellSize;
+      let y = i - vField[i][j] * dt / cellSize;
+      x = clamp(x, 0.5, cols - 1.5);
+      y = clamp(y, 0.5, rows - 1.5);
+      const i0 = Math.floor(y);
+      const i1 = i0 + 1;
+      const j0 = Math.floor(x);
+      const j1 = j0 + 1;
+      const s1 = x - j0;
+      const s0 = 1 - s1;
+      const t1 = y - i0;
+      const t0 = 1 - t1;
+      // Bilinear interpolation
+      uNew[i][j] =
+        s0 * (t0 * uField[i0][j0] + t1 * uField[i1][j0]) +
+        s1 * (t0 * uField[i0][j1] + t1 * uField[i1][j1]);
+      vNew[i][j] =
+        s0 * (t0 * vField[i0][j0] + t1 * vField[i1][j0]) +
+        s1 * (t0 * vField[i0][j1] + t1 * vField[i1][j1]);
+    }
+  }
+  // Copy back
+  for (let i = 0; i < rows; i++) {
+    for (let j = 0; j < cols; j++) {
+      grid[i][j].u = uNew[i][j];
+      grid[i][j].v = vNew[i][j];
+    }
+  }
+}
+
+// Projection step (enforce incompressibility)
+function project(grid: FluidCell[][], rows: number, cols: number, cellSize: number) {
+  const div: number[][] = [];
+  const p: number[][] = [];
+  for (let i = 0; i < rows; i++) {
+    div[i] = [];
+    p[i] = [];
+    for (let j = 0; j < cols; j++) {
+      // Compute divergence
+      const uR = j < cols - 1 ? grid[i][j + 1].u : 0;
+      const uL = j > 0 ? grid[i][j - 1].u : 0;
+      const vU = i < rows - 1 ? grid[i + 1][j].v : 0;
+      const vD = i > 0 ? grid[i - 1][j].v : 0;
+      div[i][j] = -0.5 * cellSize * (uR - uL + vU - vD);
+      p[i][j] = 0;
+    }
+  }
+  // Solve Poisson equation for pressure (Jacobi iteration)
+  for (let k = 0; k < 20; k++) {
+    for (let i = 1; i < rows - 1; i++) {
+      for (let j = 1; j < cols - 1; j++) {
+        p[i][j] = (div[i][j] + p[i - 1][j] + p[i + 1][j] + p[i][j - 1] + p[i][j + 1]) / 4;
+      }
+    }
+  }
+  // Subtract pressure gradient from velocity field
+  for (let i = 1; i < rows - 1; i++) {
+    for (let j = 1; j < cols - 1; j++) {
+      grid[i][j].u -= 0.5 * (p[i][j + 1] - p[i][j - 1]) / cellSize;
+      grid[i][j].v -= 0.5 * (p[i + 1][j] - p[i - 1][j]) / cellSize;
+    }
+  }
+}
+
+// Improved Stable Fluids update (now takes parameters)
+function updateFluid(grid: FluidCell[][], rows: number, cols: number, cellSize: number) {
+  const dt = 0.1;
+  const viscosity = 0.1;
+
+  // 1. Add forces (already done in mouse interaction)
+
+  // 2. Diffuse velocities (simple explicit diffusion)
+  for (let i = 1; i < rows - 1; i++) {
+    for (let j = 1; j < cols - 1; j++) {
+      grid[i][j].u = grid[i][j].u_prev +
+        viscosity * (
+          grid[i+1][j].u_prev + grid[i-1][j].u_prev +
+          grid[i][j+1].u_prev + grid[i][j-1].u_prev - 
+          4 * grid[i][j].u_prev
+        );
+      grid[i][j].v = grid[i][j].v_prev +
+        viscosity * (
+          grid[i+1][j].v_prev + grid[i-1][j].v_prev +
+          grid[i][j+1].v_prev + grid[i][j-1].v_prev - 
+          4 * grid[i][j].v_prev
+        );
+    }
+  }
+
+  // 3. Advect velocities
+  // Prepare arrays for advection
+  const uField: number[][] = [];
+  const vField: number[][] = [];
+  for (let i = 0; i < rows; i++) {
+    uField[i] = [];
+    vField[i] = [];
+    for (let j = 0; j < cols; j++) {
+      uField[i][j] = grid[i][j].u;
+      vField[i][j] = grid[i][j].v;
+    }
+  }
+  advect(grid, uField, vField, dt, cellSize, rows, cols);
+
+  // 4. Project (make velocity field divergence-free)
+  project(grid, rows, cols, cellSize);
+
+  // 5. Swap buffers and decay
+  for (let i = 0; i < rows; i++) {
+    for (let j = 0; j < cols; j++) {
+      grid[i][j].u_prev = grid[i][j].u * 0.99;
+      grid[i][j].v_prev = grid[i][j].v * 0.99;
+    }
+  }
+}
+
 const FluidSimulation: React.FC<FluidSimulationProps> = ({
   width = 600,
-  height = 400,
-  initialParticleCount = 50
+  height = 700,
+  initialParticleCount = 1000
 }) => {
   console.log("render")
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -139,12 +290,13 @@ const FluidSimulation: React.FC<FluidSimulationProps> = ({
   const [addSandParticles, setAddSandParticles] = useState(false);
   const [addFluidForce, setAddFluidForce] = useState(true); // Default to true
   const [showFluidVelocity, setShowFluidVelocity] = useState(false);
+  const [addDustParticles, setAddDustParticles] = useState(false);
 
   const isPausedRef = useRef(isPaused);
   const showFluidVelocityRef = useRef(showFluidVelocity);
   
   // Grid resolution
-  const cellSize = 10;
+  const cellSize = 5;
   const cols = Math.floor(width / cellSize);
   const rows = Math.floor(height / cellSize);
   
@@ -179,10 +331,20 @@ const FluidSimulation: React.FC<FluidSimulationProps> = ({
     // Initialize particles 
     const particles: SandParticle[] = [];
     for (let i = 0; i < initialParticleCount; i++) {
-      particles.push(new SandParticle(
-        Math.random() * width,
-        Math.random() * (height * 0.3) // Start in top third
-      ));
+      var rand = Math.random();
+      if (rand < 0.5) {
+        particles.push(new DustParticle(
+          Math.random() * width,
+          Math.random() * (height * 0.5) // Start in top third
+        ));
+      }
+      else {
+        particles.push(new SandParticle(
+          Math.random() * width,
+          Math.random() * (height * 0.5) // Start in top third
+        ));
+      }
+      
     }
     sandParticlesRef.current = particles;
     
@@ -254,13 +416,22 @@ const FluidSimulation: React.FC<FluidSimulationProps> = ({
         }
       }
       
-      // Add sand particles
+      // Add sand or dust particles
       if (addSandParticles && mouseRef.current.down) {
         for (let i = 0; i < 3; i++) {
           const offsetX = (Math.random() - 0.5) * 20;
           const offsetY = (Math.random() - 0.5) * 20;
           sandParticlesRef.current.push(
             new SandParticle(mouseX + offsetX, mouseY + offsetY)
+          );
+        }
+      }
+      if (addDustParticles && mouseRef.current.down) {
+        for (let i = 0; i < 2; i++) {
+          const offsetX = (Math.random() - 0.5) * 20;
+          const offsetY = (Math.random() - 0.5) * 20;
+          sandParticlesRef.current.push(
+            new DustParticle(mouseX + offsetX, mouseY + offsetY)
           );
         }
       }
@@ -289,66 +460,104 @@ const FluidSimulation: React.FC<FluidSimulationProps> = ({
       canvas.removeEventListener('mouseup', handleMouseUp);
       canvas.removeEventListener('mouseleave', handleMouseUp);
     };
-  }, [addFluidForce, addSandParticles]);
-  
-  // Simplified fluid simulation
-  const updateFluid = () => {
-    const grid = fluidGridRef.current;
-    const dt = 0.1;
-    const viscosity = 0.1;
-    
-    // Viscous diffusion
-    for (let i = 1; i < rows - 1; i++) {
-      for (let j = 1; j < cols - 1; j++) {
-        grid[i][j].u = grid[i][j].u_prev +
-          viscosity * (
-            grid[i+1][j].u_prev + grid[i-1][j].u_prev +
-            grid[i][j+1].u_prev + grid[i][j-1].u_prev - 
-            4 * grid[i][j].u_prev
-          );
-        
-        grid[i][j].v = grid[i][j].v_prev +
-          viscosity * (
-            grid[i+1][j].v_prev + grid[i-1][j].v_prev +
-            grid[i][j+1].v_prev + grid[i][j-1].v_prev - 
-            4 * grid[i][j].v_prev
-          );
-      }
-    }
-    
-    // Simple vorticity confinement (adds swirls)
-    for (let i = 1; i < rows - 1; i++) {
-      for (let j = 1; j < cols - 1; j++) {
-        // Add a bit of vorticity
-        const curl = (
-          (grid[i+1][j].u - grid[i-1][j].u) -
-          (grid[i][j+1].v - grid[i][j-1].v)
-        ) * 0.03;
-        
-        grid[i][j].u_prev = grid[i][j].u + curl;
-        grid[i][j].v_prev = grid[i][j].v - curl;
-      }
-    }
-    
-    // Swap buffers
-    for (let i = 0; i < rows; i++) {
-      for (let j = 0; j < cols; j++) {
-        grid[i][j].u = grid[i][j].u_prev;
-        grid[i][j].v = grid[i][j].v_prev;
-        
-        // Decay velocity for stability
-        grid[i][j].u_prev *= 0.99;
-        grid[i][j].v_prev *= 0.99;
-      }
-    }
-  };
+  }, [addFluidForce, addSandParticles, addDustParticles]);
   
   // Update particles based on fluid velocities
   const updateParticles = () => {
     const particles = sandParticlesRef.current;
     const grid = fluidGridRef.current;
     const dt = 0.16;
-    
+
+    // --- Spatial grid setup ---
+    const spatialCellSize = 8; // Slightly smaller than sand size for accuracy
+    const gridCols = Math.ceil(width / spatialCellSize);
+    const gridRows = Math.ceil(height / spatialCellSize);
+    // Each cell contains an array of indices into the particles array
+    const spatialGrid: number[][][] = Array.from({ length: gridRows }, () =>
+      Array.from({ length: gridCols }, () => [])
+    );
+
+    // Place particles into spatial grid
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
+      const cellX = Math.floor(p.pos.x / spatialCellSize);
+      const cellY = Math.floor(p.pos.y / spatialCellSize);
+      if (
+        cellX >= 0 && cellX < gridCols &&
+        cellY >= 0 && cellY < gridRows
+      ) {
+        spatialGrid[cellY][cellX].push(i);
+      }
+    }
+
+    // --- Efficient collision detection ---
+    for (let i = 0; i < particles.length; i++) {
+      const p1 = particles[i];
+      const cellX = Math.floor(p1.pos.x / spatialCellSize);
+      const cellY = Math.floor(p1.pos.y / spatialCellSize);
+      // Check this cell and neighbors
+      for (let oy = -1; oy <= 1; oy++) {
+        for (let ox = -1; ox <= 1; ox++) {
+          const nx = cellX + ox;
+          const ny = cellY + oy;
+          if (nx < 0 || nx >= gridCols || ny < 0 || ny >= gridRows) continue;
+          const cell = spatialGrid[ny][nx];
+          for (const j of cell) {
+            if (i >= j) continue; // Avoid double checks and self
+            const p2 = particles[j];
+            // Dust only collides with sand
+            if (p1 instanceof DustParticle && p2 instanceof DustParticle) continue;
+            // Usual collision logic
+            const dx = p2.pos.x - p1.pos.x;
+            const dy = p2.pos.y - p1.pos.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            const minDist = p1.size + p2.size;
+            if (dist < minDist && dist > 0) {
+              const overlap = 0.5 * (minDist - dist);
+              const nx = dx / dist;
+              const ny = dy / dist;
+              p1.pos.x -= nx * overlap;
+              p1.pos.y -= ny * overlap;
+              p2.pos.x += nx * overlap;
+              p2.pos.y += ny * overlap;
+              // Velocity response (damped bounce)
+              const bounce = 0.5;
+              const v1 = p1.vel.x * nx + p1.vel.y * ny;
+              const v2 = p2.vel.x * nx + p2.vel.y * ny;
+              const v1After = v2 * bounce;
+              const v2After = v1 * bounce;
+              p1.vel.x += (v1After - v1) * nx;
+              p1.vel.y += (v1After - v1) * ny;
+              p2.vel.x += (v2After - v2) * nx;
+              p2.vel.y += (v2After - v2) * ny;
+            }
+          }
+        }
+      }
+    }
+
+    // After collision resolution, for each dust, check if it overlaps sand below and stop it
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
+      if (p instanceof DustParticle) {
+        for (let j = 0; j < particles.length; j++) {
+          if (i === j) continue;
+          const other = particles[j];
+          if (!(other instanceof DustParticle)) {
+            // If dust is overlapping sand and above it, stop downward velocity
+            const dx = other.pos.x - p.pos.x;
+            const dy = other.pos.y - p.pos.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            const minDist = p.size + other.size;
+            if (dist < minDist && dy > 0) {
+              p.pos.y = other.pos.y - minDist;
+              if (p.vel.y > 0) p.vel.y = 0;
+            }
+          }
+        }
+      }
+    }
+
     for (const particle of particles) {
       // Get fluid cell at particle position
       const cellX = Math.floor(particle.pos.x / cellSize);
@@ -373,29 +582,23 @@ const FluidSimulation: React.FC<FluidSimulationProps> = ({
   const render = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-    
-    // Clear with slight persistence for water effect
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
+
+    // Clear the canvas completely
+    ctx.clearRect(0, 0, width, height);
+    // Fill with solid background color
+    ctx.fillStyle = '#0a1e37';
     ctx.fillRect(0, 0, width, height);
-    
-    // Draw blue water background
-    ctx.fillStyle = 'rgba(30, 100, 180, 0.05)';
-    ctx.fillRect(0, 0, width, height);
-    
+
     // Draw fluid velocity field if enabled
-    console.log("showFluidVelocity", showFluidVelocityRef.current)
     if (showFluidVelocityRef.current) {
       const grid = fluidGridRef.current;
-      console.log("goodbye")
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
       ctx.lineWidth = 1;
       
       for (let i = 0; i < rows; i += 2) {
         for (let j = 0; j < cols; j += 2) {
-          // console.log(`i: ${i}, j: ${j}`);
           const x = (j + 0.5) * cellSize;
           const y = (i + 0.5) * cellSize;
           const u = grid[i][j].u;
@@ -428,7 +631,7 @@ const FluidSimulation: React.FC<FluidSimulationProps> = ({
   // Animation loop
   const animate = () => {
     if (!isPausedRef.current) {
-      updateFluid();
+      updateFluid(fluidGridRef.current, rows, cols, cellSize);
       updateParticles();
     }
     
@@ -466,6 +669,18 @@ const FluidSimulation: React.FC<FluidSimulationProps> = ({
           }}
         >
           {addSandParticles ? 'Adding Sand' : 'Add Sand'}
+        </button>
+        
+        <button 
+          onClick={() => setAddDustParticles(!addDustParticles)}
+          style={{ 
+            margin: '5px', 
+            padding: '8px 12px',
+            background: addDustParticles ? '#bfc9d1' : undefined,
+            color: addDustParticles ? '#222' : undefined
+          }}
+        >
+          {addDustParticles ? 'Adding Dust' : 'Add Dust'}
         </button>
         
         <button 
@@ -508,6 +723,7 @@ const FluidSimulation: React.FC<FluidSimulationProps> = ({
       <div style={{ marginTop: '10px', fontSize: '14px' }}>
         <p>Drag with "Add Fluid Force" to move the water (enabled by default)</p>
         <p>Toggle "Add Sand" and drag to create sand particles</p>
+        <p>Toggle "Add Dust" and drag to create dust particles</p>
         <p>Toggle "Show Fluid Velocity" to see water current directions</p>
       </div>
     </div>
